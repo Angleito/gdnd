@@ -39,8 +39,8 @@ export default function GamePage() {
   // Redirect if no player
   useEffect(() => {
     if (!player) {
-      logger.ui('GamePage', 'No player found, redirecting to home');
-      router.push('/');
+      logger.ui('GamePage', 'No player found, redirecting to create');
+      router.push('/create');
     }
   }, [player, router]);
 
