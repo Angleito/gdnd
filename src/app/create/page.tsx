@@ -22,13 +22,13 @@ export default function CreatePage() {
   const [loadingMessage, setLoadingMessage] = useState('');
 
   const handleRaceSelect = (race: Race) => {
-    logger.ui('Home', 'Race selected', { race });
+    logger.ui('CreatePage', 'Race selected', { race });
     setSelectedRace(race);
     setStep('class');
   };
 
   const handleClassSelect = (cls: Class) => {
-    logger.ui('Home', 'Class selected', { class: cls });
+    logger.ui('CreatePage', 'Class selected', { class: cls });
     setSelectedClass(cls);
     setStep('name');
   };
@@ -37,7 +37,7 @@ export default function CreatePage() {
     e.preventDefault();
     if (!name.trim() || !selectedRace || !selectedClass) return;
 
-    logger.ui('Home', 'Character creation started', {
+    logger.ui('CreatePage', 'Character creation started', {
       name: name.trim(),
       race: selectedRace,
       class: selectedClass,
@@ -76,35 +76,57 @@ export default function CreatePage() {
 
       setPlayerBackstory(backstoryData.backstory);
       addMessage('model', backstoryData.startingScene);
-      setScene(backstoryData.startingScene);
 
-      // Generate portrait
-      setLoadingMessage('Your visage takes form...');
-      logger.api('POST', '/api/image', 'request', { type: 'player' });
+      // Generate portrait and scene sprite in parallel
+      setLoadingMessage('Your world takes shape...');
       
-      const portraitRes = await fetch('/api/image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'player',
-          race: selectedRace,
-          characterClass: selectedClass,
-          name: name.trim(),
-        }),
-      });
+      logger.api('POST', '/api/image', 'request', { type: 'player' });
+      logger.api('POST', '/api/image', 'request', { type: 'scene' });
 
+      const [portraitRes, sceneRes] = await Promise.all([
+        fetch('/api/image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'player',
+            race: selectedRace,
+            characterClass: selectedClass,
+            name: name.trim(),
+          }),
+        }),
+        fetch('/api/image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 'scene',
+            description: backstoryData.startingScene,
+          }),
+        }),
+      ]);
+
+      // Handle portrait
       if (portraitRes.ok) {
         const portraitData = await portraitRes.json();
         logger.game('Portrait generated', { imageSize: portraitData.image.length });
         setPlayerPortrait(portraitData.image);
       } else {
-        logger.warn('Home', 'Portrait generation failed, continuing without portrait');
+        logger.warn('CreatePage', 'Portrait generation failed, continuing without portrait');
       }
 
-      logger.ui('Home', 'Character creation complete, navigating to game');
+      // Handle scene sprite
+      if (sceneRes.ok) {
+        const sceneData = await sceneRes.json();
+        logger.game('Scene sprite generated', { imageSize: sceneData.image.length });
+        setScene(backstoryData.startingScene, sceneData.image);
+      } else {
+        logger.warn('CreatePage', 'Scene generation failed, continuing without scene sprite');
+        setScene(backstoryData.startingScene);
+      }
+
+      logger.ui('CreatePage', 'Character creation complete, navigating to game');
       router.push('/game');
     } catch (err) {
-      logger.error('Home', 'Character creation error', {
+      logger.error('CreatePage', 'Character creation error', {
         error: err instanceof Error ? err.message : 'Unknown error',
       });
       setError(err instanceof Error ? err.message : 'Something went wrong');
@@ -114,10 +136,10 @@ export default function CreatePage() {
 
   const handleBack = () => {
     if (step === 'class') {
-      logger.ui('Home', 'Back to race selection');
+      logger.ui('CreatePage', 'Back to race selection');
       setStep('race');
     } else if (step === 'name') {
-      logger.ui('Home', 'Back to class selection');
+      logger.ui('CreatePage', 'Back to class selection');
       setStep('class');
     }
   };

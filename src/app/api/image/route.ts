@@ -84,13 +84,26 @@ export async function POST(req: Request) {
     );
   } catch (error) {
     const elapsed = Date.now() - startTime;
+    const errorMessage = error instanceof Error ? error.message : 'Internal server error';
+    const errorDetails = error instanceof Error && 'cause' in error ? error.cause : undefined;
+    
     logger.api('POST', '/api/image', 'error', {
-      error: error instanceof Error ? error.message : 'Internal server error',
+      error: errorMessage,
+      details: errorDetails,
+      stack: error instanceof Error ? error.stack : undefined,
     }, elapsed);
     
+    // Check for quota/rate limit errors
+    const isQuotaError = errorMessage.includes('quota') || 
+                         errorMessage.includes('429') || 
+                         errorMessage.includes('RESOURCE_EXHAUSTED');
+    
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Internal server error' },
-      { status: 500 }
+      { 
+        error: isQuotaError ? 'API quota exceeded. Please try again later.' : errorMessage,
+        retryable: isQuotaError,
+      },
+      { status: isQuotaError ? 429 : 500 }
     );
   }
 }
