@@ -2,6 +2,12 @@
 
 import Link from 'next/link';
 
+// Deterministic "random" based on seed - avoids hydration mismatch
+const seededRandom = (seed: number) => {
+  const x = Math.sin(seed * 9999) * 10000;
+  return x - Math.floor(x);
+};
+
 // SVG Icons
 const DragonIcon = () => (
   <svg viewBox="0 0 64 64" fill="currentColor" className="w-16 h-16">
@@ -73,9 +79,9 @@ export default function LandingPage() {
               key={i}
               className="absolute w-1 h-1 bg-accent/30 rounded-full animate-pulse-slow"
               style={{
-                left: `${Math.random() * 100}%`,
-                top: `${Math.random() * 100}%`,
-                animationDelay: `${Math.random() * 2}s`,
+                left: `${seededRandom(i * 3 + 1) * 100}%`,
+                top: `${seededRandom(i * 7 + 2) * 100}%`,
+                animationDelay: `${seededRandom(i * 11 + 3) * 2}s`,
               }}
             />
           ))}
