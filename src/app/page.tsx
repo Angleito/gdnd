@@ -3,9 +3,10 @@
 import Link from 'next/link';
 
 // Deterministic "random" based on seed - avoids hydration mismatch
+// Round to 2 decimal places to prevent floating point precision differences
 const seededRandom = (seed: number) => {
   const x = Math.sin(seed * 9999) * 10000;
-  return x - Math.floor(x);
+  return Math.round((x - Math.floor(x)) * 100) / 100;
 };
 
 // SVG Icons
