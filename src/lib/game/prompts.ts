@@ -22,7 +22,17 @@ RESPONSE FORMAT - Return ONLY valid JSON matching this exact schema:
   } | null
 }
 
-RULES:
+SKILL CHECK RULES:
+- When a SKILL_CHECK is provided with the action, you MUST honor the roll result
+- The roll has already been made by the player - DO NOT override it
+- Natural 20 (isCritical): Exceptional success, extra benefits, dramatic positive outcome
+- Natural 1 (isFumble): Comical or dramatic failure, but not unfair punishment
+- High total (15+): Generally succeeds, character accomplishes their goal
+- Medium total (10-14): Partial success or success with complications
+- Low total (below 10): Failure, but describe it narratively without harsh punishment
+- Craft your narrative based on the skill check result
+
+GENERAL RULES:
 1. Write narrative in second person ("You...")
 2. Provide 2-4 meaningful, distinct action choices
 3. Set newCharacter ONLY when introducing a NEW named NPC (not generic guards/merchants)
@@ -65,6 +75,48 @@ CHARACTER STATE:
 `.trim();
 }
 
+export interface SkillCheckContext {
+  type: string;
+  skill?: string;
+  ability: string;
+  roll: number;
+  modifier: number;
+  total: number;
+  isCritical: boolean;
+  isFumble: boolean;
+  reason: string;
+}
+
+export function buildSkillCheckContext(skillCheck: SkillCheckContext): string {
+  let resultDescription = '';
+  
+  if (skillCheck.isCritical) {
+    resultDescription = 'NATURAL 20! Critical success - give exceptional results';
+  } else if (skillCheck.isFumble) {
+    resultDescription = 'NATURAL 1! Critical failure - describe dramatic but fair failure';
+  } else if (skillCheck.total >= 20) {
+    resultDescription = 'Exceptional success';
+  } else if (skillCheck.total >= 15) {
+    resultDescription = 'Clear success';
+  } else if (skillCheck.total >= 10) {
+    resultDescription = 'Partial success or success with minor complications';
+  } else {
+    resultDescription = 'Failure - describe narratively without harsh punishment';
+  }
+
+  const skillName = skillCheck.skill 
+    ? skillCheck.skill.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())
+    : skillCheck.ability.toUpperCase();
+
+  return `
+SKILL_CHECK RESULT (you MUST honor this result):
+- Check: ${skillName} (${skillCheck.ability.toUpperCase()})
+- Reason: ${skillCheck.reason}
+- Roll: ${skillCheck.roll} + ${skillCheck.modifier} = ${skillCheck.total}
+- Result: ${resultDescription}
+`.trim();
+}
+
 export const PORTRAIT_STYLE_PROMPT = `Fantasy character portrait, pixel art style, 256x256 resolution, dark moody atmospheric background, dramatic lighting, detailed face and upper body, adventurer attire appropriate to their class, high quality game art style`;
 
-export const SCENE_STYLE_PROMPT = `Fantasy landscape scene, pixel art style, 512x256 resolution, atmospheric lighting, detailed environment, high quality game art style, suitable for a D&D adventure`;
+export const SCENE_STYLE_PROMPT = `Fantasy landscape scene, pixel art style, 512x256 resolution, atmospheric lighting, detailed environment, cinematic composition, no UI elements, no HUD, no health bars, no text overlays, pure scenic artwork`;

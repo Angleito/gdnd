@@ -6,18 +6,27 @@ import { useGameStore } from '@/stores/game-store';
 import { CharacterSheet } from '@/components/character-sheet';
 import { GameDisplay } from '@/components/game-display';
 import { ActionInput } from '@/components/action-input';
-import { AudioPlayer, TTSToggle } from '@/components/audio-player';
 import { LoadingSpinner } from '@/components/loading-spinner';
+import { ChatLogButton } from '@/components/chat-log-button';
+import { ChatLogPanel } from '@/components/chat-log-panel';
+import { DiceRollerModal } from '@/components/dice-roller';
+import { SettingsPanel } from '@/components/settings-panel';
 import { logger } from '@/lib/logger';
+import { shouldRegenerateScene } from '@/lib/utils';
 import type { DMResponseType } from '@/lib/game/schemas';
+import { detectSkillCheck, getCheckReason, performSkillCheck } from '@/lib/dice';
+import type { SkillCheckResult } from '@/lib/dice';
 
 export default function GamePage() {
   const router = useRouter();
   const {
     player,
+    scene,
     history,
-    settings,
+    historySummary,
     isLoading,
+    combatLog,
+    combatTurn,
     setLoading,
     setError,
     addMessage,
@@ -31,10 +40,25 @@ export default function GamePage() {
     setNPCPortrait,
     cacheSprite,
     getSprite,
+    addCombatLogEntries,
+    setHistorySummary,
+    loadSpritesFromStorage,
   } = useGameStore();
 
   const [actions, setActions] = useState<string[]>([]);
-  const [currentAudio, setCurrentAudio] = useState<string | null>(null);
+  const [chatLogOpen, setChatLogOpen] = useState(false);
+  const [lastSeenLogCount, setLastSeenLogCount] = useState(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  
+  // Dice roller state
+  const [diceRollResult, setDiceRollResult] = useState<SkillCheckResult | null>(null);
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const [showDiceRoller, setShowDiceRoller] = useState(false);
+
+  // Load cached sprites from localStorage on mount
+  useEffect(() => {
+    loadSpritesFromStorage();
+  }, [loadSpritesFromStorage]);
 
   // Redirect if no player
   useEffect(() => {
@@ -57,32 +81,90 @@ export default function GamePage() {
     }
   }, [history, actions.length]);
 
-  const handleAction = useCallback(
-    async (action: string) => {
-      if (!player || isLoading) return;
+  // Summarize history when it gets too long (every 10 messages after 20)
+  useEffect(() => {
+    const summarizeIfNeeded = async () => {
+      const historyLength = history.length;
+      // Summarize when we have 20+ messages and every 10 after that
+      const shouldSummarize = historyLength >= 20 && historyLength % 10 === 0;
+      
+      if (shouldSummarize && !isLoading) {
+        try {
+          logger.game('Summarizing history', { historyLength });
+          
+          // Get messages to summarize (everything except last 10)
+          const toSummarize = history.slice(0, -10);
+          
+          const response = await fetch('/api/dm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: 'summarize',
+              messages: toSummarize,
+              existingSummary: historySummary || '',
+            }),
+          });
+          
+          if (response.ok) {
+            const data = await response.json();
+            if (data.summary) {
+              setHistorySummary(data.summary);
+              logger.game('History summarized', { summaryLength: data.summary.length });
+            }
+          }
+        } catch (err) {
+          // Fail silently - summarization is optional
+          logger.error('GamePage', 'History summarization failed');
+        }
+      }
+    };
+    
+    summarizeIfNeeded();
+  }, [history.length, historySummary, isLoading, history, setHistorySummary]);
 
-      logger.group('GAME', `Player Action: ${action}`);
-      logger.game('Action initiated', { action, playerHP: player.hp.current });
+  // Submit action to DM (with optional skill check result)
+  const submitActionToDM = useCallback(
+    async (action: string, skillCheck?: SkillCheckResult) => {
+      if (!player) return;
 
+      logger.group('GAME', `Submitting Action: ${action}`);
       setLoading(true);
       setError(null);
-      setCurrentAudio(null);
 
       try {
         addMessage('user', action);
 
-        logger.api('POST', '/api/dm', 'request', { type: 'action', action });
+        const requestBody: Record<string, unknown> = {
+          type: 'action',
+          player,
+          history,
+          historySummary,
+          action,
+        };
+
+        // Include skill check result if provided
+        if (skillCheck) {
+          requestBody.skillCheck = {
+            type: skillCheck.check.type,
+            skill: skillCheck.check.skill,
+            ability: skillCheck.check.ability,
+            roll: skillCheck.roll,
+            modifier: skillCheck.modifier,
+            total: skillCheck.total,
+            isCritical: skillCheck.isCritical,
+            isFumble: skillCheck.isFumble,
+            reason: skillCheck.reason,
+          };
+          logger.game('Including skill check', requestBody.skillCheck as Record<string, unknown>);
+        }
+
+        logger.api('POST', '/api/dm', 'request', { type: 'action', action, hasSkillCheck: !!skillCheck });
         const startTime = Date.now();
         
         const response = await fetch('/api/dm', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 'action',
-            player,
-            history,
-            action,
-          }),
+          body: JSON.stringify(requestBody),
         });
 
         if (!response.ok) {
@@ -152,6 +234,17 @@ export default function GamePage() {
           setCombat(null);
         }
 
+        // Process combat log entries from DM
+        if (data.combatLog && data.combatLog.length > 0) {
+          logger.game('Adding combat log entries', { count: data.combatLog.length });
+          const entries = data.combatLog.map((entry) => ({
+            ...entry,
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+            timestamp: Date.now(),
+          }));
+          addCombatLogEntries(entries);
+        }
+
         // Handle new character
         if (data.newCharacter) {
           logger.game('New character introduced', { name: data.newCharacter.name });
@@ -177,46 +270,33 @@ export default function GamePage() {
             .catch((err) => logger.error('GamePage', 'NPC portrait generation failed', { error: err.message }));
         }
 
-        // Handle new scene
+        // Handle new scene - only regenerate if significantly different
         if (data.newScene) {
-          logger.game('New scene', { description: data.newScene.description });
-          fetch('/api/image', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              type: 'scene',
-              description: data.newScene.description,
-            }),
-          })
-            .then((res) => res.json())
-            .then((imgData) => {
-              if (imgData.image) {
-                logger.game('Scene sprite generated');
-                setScene(data.newScene!.description, imgData.image);
-              }
+          const currentSceneDesc = scene?.description || null;
+          
+          if (shouldRegenerateScene(currentSceneDesc, data.newScene.description)) {
+            logger.game('New scene (regenerating)', { description: data.newScene.description });
+            fetch('/api/image', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                type: 'scene',
+                description: data.newScene.description,
+              }),
             })
-            .catch((err) => logger.error('GamePage', 'Scene sprite generation failed', { error: err.message }));
-        }
-
-        // Generate TTS in background
-        if (settings.ttsEnabled) {
-          logger.game('Generating TTS narration');
-          fetch('/api/tts', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              text: data.narrative,
-              voice: 'Kore',
-            }),
-          })
-            .then((res) => res.json())
-            .then((ttsData) => {
-              if (ttsData.audio) {
-                logger.game('TTS audio ready', { audioSize: ttsData.audio.length });
-                setCurrentAudio(ttsData.audio);
-              }
-            })
-            .catch((err) => logger.error('GamePage', 'TTS generation failed', { error: err.message }));
+              .then((res) => res.json())
+              .then((imgData) => {
+                if (imgData.image) {
+                  logger.game('Scene sprite generated');
+                  setScene(data.newScene!.description, imgData.image);
+                }
+              })
+              .catch((err) => logger.error('GamePage', 'Scene sprite generation failed', { error: err.message }));
+          } else {
+            // Reuse existing scene image, just update description
+            logger.game('New scene (reusing image)', { description: data.newScene.description });
+            setScene(data.newScene.description, scene?.sprite || undefined);
+          }
         }
 
         logger.groupEnd();
@@ -232,9 +312,9 @@ export default function GamePage() {
     },
     [
       player,
+      scene,
       history,
-      isLoading,
-      settings.ttsEnabled,
+      historySummary,
       addMessage,
       updatePlayerHP,
       updatePlayerGold,
@@ -248,8 +328,82 @@ export default function GamePage() {
       getSprite,
       setLoading,
       setError,
+      addCombatLogEntries,
     ]
   );
+
+  // Handle action - check if skill check needed first
+  const handleAction = useCallback(
+    async (action: string) => {
+      if (!player || isLoading) return;
+
+      logger.group('GAME', `Player Action: ${action}`);
+      logger.game('Action initiated', { action, playerHP: player.hp.current });
+
+      // Check if this action requires a skill check
+      const check = detectSkillCheck(action);
+
+      if (check) {
+        logger.game('Skill check detected', { check });
+        
+        // Perform the roll
+        const reason = getCheckReason(action, check);
+        const result = performSkillCheck(check, player.stats, reason);
+        
+        logger.game('Skill check result', {
+          skill: check.skill,
+          ability: check.ability,
+          roll: result.roll,
+          modifier: result.modifier,
+          total: result.total,
+          isCritical: result.isCritical,
+          isFumble: result.isFumble,
+        });
+
+        // Add to combat log (store adds id/timestamp automatically)
+        addCombatLogEntries([{
+          turn: combatTurn,
+          type: result.isCritical ? 'critical' : result.isFumble ? 'fumble' : 'roll',
+          actor: player.name,
+          action: reason,
+          diceRoll: {
+            dice: 'D20',
+            count: 1,
+            rolls: [result.roll],
+            modifier: result.modifier,
+            total: result.total,
+          },
+          result: result.isCritical ? 'critical' : result.isFumble ? 'fumble' : 'success',
+        }]);
+
+        // Show dice roller modal
+        setDiceRollResult(result);
+        setPendingAction(action);
+        setShowDiceRoller(true);
+        
+        logger.groupEnd();
+        return;
+      }
+
+      // No skill check needed, submit directly
+      logger.groupEnd();
+      await submitActionToDM(action);
+    },
+    [player, isLoading, combatTurn, addCombatLogEntries, submitActionToDM]
+  );
+
+  // Handle dice roll completion
+  const handleDiceRollComplete = useCallback(() => {
+    setShowDiceRoller(false);
+    
+    if (pendingAction && diceRollResult) {
+      // Submit the action with the skill check result
+      submitActionToDM(pendingAction, diceRollResult);
+    }
+    
+    setPendingAction(null);
+    setDiceRollResult(null);
+  }, [pendingAction, diceRollResult, submitActionToDM]);
 
   const handleNewGame = () => {
     logger.ui('GamePage', 'New game requested');
@@ -267,12 +421,48 @@ export default function GamePage() {
 
   return (
     <main className="min-h-screen flex flex-col lg:flex-row">
+      {/* Dice Roller Modal */}
+      <DiceRollerModal
+        isOpen={showDiceRoller}
+        result={diceRollResult}
+        onComplete={handleDiceRollComplete}
+      />
+
+      {/* Settings Panel (LEFT side) */}
+      <SettingsPanel
+        isOpen={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+      />
+
+      {/* Chat Log FAB and Panel */}
+      <ChatLogButton
+        count={combatLog.length}
+        onClick={() => {
+          setChatLogOpen(true);
+          setLastSeenLogCount(combatLog.length);
+        }}
+        hasNew={combatLog.length > lastSeenLogCount}
+      />
+      <ChatLogPanel
+        isOpen={chatLogOpen}
+        onClose={() => setChatLogOpen(false)}
+      />
+
       {/* Sidebar - Character Sheet */}
       <aside className="lg:w-72 lg:min-h-screen border-b lg:border-b-0 lg:border-r border-white/10 p-4 bg-white/[0.02]">
         <div className="flex items-center justify-between mb-4">
           <h1 className="text-lg font-bold text-accent">AI Dungeon Master</h1>
           <div className="flex items-center gap-2">
-            <TTSToggle />
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="p-2 rounded-lg bg-white/10 hover:bg-white/20 text-muted hover:text-foreground transition-colors"
+              title="Settings"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </button>
             <button
               onClick={handleNewGame}
               className="p-2 rounded-lg bg-white/10 hover:bg-white/20 text-muted hover:text-foreground transition-colors"
@@ -285,11 +475,6 @@ export default function GamePage() {
           </div>
         </div>
         <CharacterSheet />
-        {currentAudio && (
-          <div className="mt-4">
-            <AudioPlayer audioBase64={currentAudio} />
-          </div>
-        )}
       </aside>
 
       {/* Main Game Area */}

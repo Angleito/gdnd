@@ -44,17 +44,3 @@ export const STARTING_GOLD: Record<Class, number> = {
   ranger: 40,
   bard: 45,
 };
-
-export const TTS_VOICES = [
-  'Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede',
-  'Leda', 'Orus', 'Zephyr', 'Callisto', 'Helios'
-] as const;
-
-export type TTSVoice = typeof TTS_VOICES[number];
-
-export function getVoiceForNPC(name: string): TTSVoice {
-  const hash = name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-  return TTS_VOICES[hash % TTS_VOICES.length];
-}
-
-export const NARRATOR_VOICE: TTSVoice = 'Kore';

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { generateDMResponse, generateBackstory } from '@/lib/gemini/dm';
+import { generateDMResponse, generateBackstory, summarizeHistory } from '@/lib/gemini/dm';
 import { logger } from '@/lib/logger';
 import type { Player, GameMessage } from '@/types/game';
 
@@ -37,10 +37,22 @@ export async function POST(req: Request) {
     }
 
     if (type === 'action') {
-      const { player, history, action } = body as {
+      const { player, history, action, skillCheck, historySummary } = body as {
         player: Player;
         history: GameMessage[];
         action: string;
+        historySummary?: string | null;
+        skillCheck?: {
+          type: string;
+          skill?: string;
+          ability: string;
+          roll: number;
+          modifier: number;
+          total: number;
+          isCritical: boolean;
+          isFumble: boolean;
+          reason: string;
+        };
       };
 
       if (!player || !action) {
@@ -55,6 +67,8 @@ export async function POST(req: Request) {
         player,
         history: history || [],
         action,
+        skillCheck,
+        historySummary,
       });
 
       const elapsed = Date.now() - startTime;
@@ -71,9 +85,34 @@ export async function POST(req: Request) {
       return NextResponse.json(result);
     }
 
+    if (type === 'summarize') {
+      const { messages, existingSummary } = body as {
+        messages: GameMessage[];
+        existingSummary?: string | null;
+      };
+
+      if (!messages || messages.length === 0) {
+        logger.api('POST', '/api/dm', 'error', { error: 'Missing messages' });
+        return NextResponse.json(
+          { error: 'Missing required field: messages' },
+          { status: 400 }
+        );
+      }
+
+      const summary = await summarizeHistory({ messages, existingSummary });
+      const elapsed = Date.now() - startTime;
+
+      logger.api('POST', '/api/dm', 'response', {
+        type: 'summarize',
+        summaryLength: summary.length,
+      }, elapsed);
+
+      return NextResponse.json({ summary });
+    }
+
     logger.api('POST', '/api/dm', 'error', { error: 'Invalid type' });
     return NextResponse.json(
-      { error: 'Invalid type. Use "backstory" or "action"' },
+      { error: 'Invalid type. Use "backstory", "action", or "summarize"' },
       { status: 400 }
     );
   } catch (error) {

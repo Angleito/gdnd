@@ -1,14 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import * as fc from 'fast-check';
 import {
   RACES,
   CLASSES,
   BASE_STATS,
   BASE_HP,
   STARTING_GOLD,
-  TTS_VOICES,
-  getVoiceForNPC,
-  NARRATOR_VOICE,
 } from '../constants';
 
 describe('RACES', () => {
@@ -103,57 +99,5 @@ describe('STARTING_GOLD', () => {
       expect(typeof STARTING_GOLD[cls.value]).toBe('number');
       expect(STARTING_GOLD[cls.value]).toBeGreaterThan(0);
     });
-  });
-});
-
-describe('TTS_VOICES', () => {
-  it('has at least 10 voices', () => {
-    expect(TTS_VOICES.length).toBeGreaterThanOrEqual(10);
-  });
-
-  it('all voices are strings', () => {
-    TTS_VOICES.forEach((voice) => {
-      expect(typeof voice).toBe('string');
-    });
-  });
-
-  it('includes narrator voice', () => {
-    expect(TTS_VOICES).toContain(NARRATOR_VOICE);
-  });
-});
-
-describe('getVoiceForNPC', () => {
-  it('returns a valid voice', () => {
-    const voice = getVoiceForNPC('Test NPC');
-    expect(TTS_VOICES).toContain(voice);
-  });
-
-  it('is deterministic for same name', () => {
-    const voice1 = getVoiceForNPC('Gandalf');
-    const voice2 = getVoiceForNPC('Gandalf');
-    expect(voice1).toBe(voice2);
-  });
-
-  it('returns different voices for different names', () => {
-    const voices = new Set<string>();
-    const names = ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve', 'Frank'];
-    names.forEach((name) => voices.add(getVoiceForNPC(name)));
-    // Should have at least 2 different voices (probabilistically)
-    expect(voices.size).toBeGreaterThan(1);
-  });
-
-  it('handles empty string', () => {
-    const voice = getVoiceForNPC('');
-    expect(TTS_VOICES).toContain(voice);
-  });
-
-  it('property: returns valid voice for any string', () => {
-    fc.assert(
-      fc.property(fc.string(), (name) => {
-        const voice = getVoiceForNPC(name);
-        return TTS_VOICES.includes(voice as typeof TTS_VOICES[number]);
-      }),
-      { numRuns: 100 }
-    );
   });
 });

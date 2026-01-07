@@ -1,17 +1,28 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { Player, GameMessage, Scene, NPC, CombatState, DMCombatState, GameSettings, Race, Class } from '@/types/game';
-import { BASE_STATS, BASE_HP, STARTING_GOLD, getVoiceForNPC } from '@/lib/game/constants';
+import type { Player, GameMessage, Scene, NPC, CombatState, DMCombatState, GameSettings, Race, Class, CombatLogEntry, DMCombatLogEntry } from '@/types/game';
+import { BASE_STATS, BASE_HP, STARTING_GOLD } from '@/lib/game/constants';
 import { generateId } from '@/lib/utils';
 import { logger } from '@/lib/logger';
+
+const IMAGE_CACHE_KEY = 'gdnd-image-cache';
+const MAX_CACHED_IMAGES = 10;
+
+interface ImageCacheEntry {
+  data: string;
+  timestamp: number;
+}
 
 interface GameState {
   player: Player | null;
   scene: Scene | null;
   history: GameMessage[];
+  historySummary: string | null;
   npcs: Map<string, NPC>;
   sprites: Map<string, string>;
   combat: CombatState | null;
+  combatLog: CombatLogEntry[];
+  combatTurn: number;
   settings: GameSettings;
   isLoading: boolean;
   error: string | null;
@@ -27,15 +38,23 @@ interface GameState {
   
   setScene: (description: string, sprite?: string) => void;
   addMessage: (role: 'user' | 'model', content: string, thoughtSignature?: string) => void;
+  setHistorySummary: (summary: string) => void;
   
   addNPC: (name: string, description: string, disposition?: 'friendly' | 'neutral' | 'hostile') => NPC;
   setNPCPortrait: (id: string, portrait: string) => void;
   
   cacheSprite: (key: string, data: string) => void;
   getSprite: (key: string) => string | undefined;
+  loadSpritesFromStorage: () => void;
   
   setCombat: (combat: DMCombatState | null) => void;
   updateEnemyHP: (enemyId: string, delta: number) => void;
+  
+  // Combat Log Actions
+  addCombatLogEntry: (entry: DMCombatLogEntry) => void;
+  addCombatLogEntries: (entries: DMCombatLogEntry[]) => void;
+  clearCombatLog: () => void;
+  incrementCombatTurn: () => void;
   
   setSettings: (settings: Partial<GameSettings>) => void;
   setLoading: (loading: boolean) => void;
@@ -45,8 +64,12 @@ interface GameState {
 }
 
 const initialSettings: GameSettings = {
-  ttsEnabled: true,
-  volume: 0.8,
+  dice: {
+    color: '#4f46e5',
+    numberColor: '#ffffff',
+    criticalColor: '#fbbf24',
+    fumbleColor: '#ef4444',
+  },
 };
 
 export const useGameStore = create<GameState>()(
@@ -55,9 +78,12 @@ export const useGameStore = create<GameState>()(
       player: null,
       scene: null,
       history: [],
+      historySummary: null,
       npcs: new Map(),
       sprites: new Map(),
       combat: null,
+      combatLog: [],
+      combatTurn: 0,
       settings: initialSettings,
       isLoading: false,
       error: null,
@@ -88,6 +114,7 @@ export const useGameStore = create<GameState>()(
             backstory: '',
           },
           history: [],
+          historySummary: null,
           npcs: new Map(),
           sprites: new Map(),
           scene: null,
@@ -239,18 +266,21 @@ export const useGameStore = create<GameState>()(
         }));
       },
 
+      setHistorySummary: (summary) => {
+        logger.store('setHistorySummary', { summaryLength: summary.length });
+        set({ historySummary: summary });
+      },
+
       addNPC: (name, description, disposition = 'neutral') => {
         const id = `npc-${name.toLowerCase().replace(/\s+/g, '-')}`;
-        const voice = getVoiceForNPC(name);
         
-        logger.store('addNPC', { id, name, disposition, voice });
+        logger.store('addNPC', { id, name, disposition });
 
         const npc: NPC = {
           id,
           name,
           description,
           portrait: null,
-          voice,
           disposition,
         };
         set((state) => {
@@ -274,36 +304,114 @@ export const useGameStore = create<GameState>()(
 
       cacheSprite: (key, data) => {
         logger.store('cacheSprite', { key, dataLength: data.length });
+        
+        // Memory cache
         set((state) => {
           const newSprites = new Map(state.sprites);
           newSprites.set(key, data);
           return { sprites: newSprites };
         });
+
+        // Persistent cache with LRU eviction
+        try {
+          const cacheStr = localStorage.getItem(IMAGE_CACHE_KEY);
+          const cache: Record<string, ImageCacheEntry> = cacheStr ? JSON.parse(cacheStr) : {};
+          
+          cache[key] = { data, timestamp: Date.now() };
+          
+          // LRU eviction - keep only MAX_CACHED_IMAGES most recent
+          const entries = Object.entries(cache);
+          if (entries.length > MAX_CACHED_IMAGES) {
+            entries.sort((a, b) => b[1].timestamp - a[1].timestamp);
+            const trimmed = Object.fromEntries(entries.slice(0, MAX_CACHED_IMAGES));
+            localStorage.setItem(IMAGE_CACHE_KEY, JSON.stringify(trimmed));
+          } else {
+            localStorage.setItem(IMAGE_CACHE_KEY, JSON.stringify(cache));
+          }
+        } catch (e) {
+          // localStorage full or unavailable - fail silently
+          logger.error('cacheSprite', 'Failed to persist to localStorage');
+        }
       },
 
       getSprite: (key) => {
-        return get().sprites.get(key);
+        // Check memory first
+        const memorySprite = get().sprites.get(key);
+        if (memorySprite) return memorySprite;
+
+        // Check localStorage
+        try {
+          const cacheStr = localStorage.getItem(IMAGE_CACHE_KEY);
+          if (cacheStr) {
+            const cache: Record<string, ImageCacheEntry> = JSON.parse(cacheStr);
+            if (cache[key]?.data) {
+              // Restore to memory cache
+              set((state) => {
+                const newSprites = new Map(state.sprites);
+                newSprites.set(key, cache[key].data);
+                return { sprites: newSprites };
+              });
+              return cache[key].data;
+            }
+          }
+        } catch (e) {
+          // localStorage unavailable
+        }
+
+        return undefined;
+      },
+
+      loadSpritesFromStorage: () => {
+        try {
+          const cacheStr = localStorage.getItem(IMAGE_CACHE_KEY);
+          if (cacheStr) {
+            const cache: Record<string, ImageCacheEntry> = JSON.parse(cacheStr);
+            set((state) => {
+              const newSprites = new Map(state.sprites);
+              for (const [key, entry] of Object.entries(cache)) {
+                newSprites.set(key, entry.data);
+              }
+              return { sprites: newSprites };
+            });
+            logger.store('loadSpritesFromStorage', { count: Object.keys(cache).length });
+          }
+        } catch (e) {
+          // localStorage unavailable
+        }
       },
 
       setCombat: (combat) => {
-        if (!combat) {
-          logger.store('setCombat', { combat: null });
-          set({ combat: null });
+        const state = get();
+        const wasInCombat = state.combat?.inCombat ?? false;
+        
+        if (!combat || !combat.inCombat) {
+          logger.store('setCombat', { combat: null, clearedLog: wasInCombat });
+          set({ 
+            combat: null,
+            combatLog: wasInCombat ? [] : state.combatLog,
+            combatTurn: wasInCombat ? 0 : state.combatTurn,
+          });
           return;
         }
+        
+        const newTurn = !wasInCombat ? 1 : state.combatTurn + 1;
         
         logger.store('setCombat', {
           inCombat: combat.inCombat,
           enemyCount: combat.enemies.length,
           enemies: combat.enemies.map(e => e.name),
           currentTurn: combat.currentTurn,
+          combatTurn: newTurn,
         });
 
         const combatWithPortraits: CombatState = {
           ...combat,
           enemies: combat.enemies.map(e => ({ ...e, portrait: null })),
         };
-        set({ combat: combatWithPortraits });
+        set({ 
+          combat: combatWithPortraits,
+          combatTurn: newTurn,
+        });
       },
 
       updateEnemyHP: (enemyId, delta) => {
@@ -332,6 +440,57 @@ export const useGameStore = create<GameState>()(
         });
       },
 
+      addCombatLogEntry: (entry) => {
+        const state = get();
+        const fullEntry: CombatLogEntry = {
+          ...entry,
+          id: generateId(),
+          timestamp: Date.now(),
+          turn: entry.turn ?? state.combatTurn,
+        };
+        
+        logger.store('addCombatLogEntry', {
+          type: fullEntry.type,
+          actor: fullEntry.actor,
+          action: fullEntry.action,
+          turn: fullEntry.turn,
+        });
+
+        set((state) => ({
+          combatLog: [...state.combatLog, fullEntry],
+        }));
+      },
+
+      addCombatLogEntries: (entries) => {
+        const state = get();
+        const fullEntries: CombatLogEntry[] = entries.map((entry) => ({
+          ...entry,
+          id: generateId(),
+          timestamp: Date.now(),
+          turn: entry.turn ?? state.combatTurn,
+        }));
+        
+        logger.store('addCombatLogEntries', {
+          count: fullEntries.length,
+          types: fullEntries.map(e => e.type),
+        });
+
+        set((state) => ({
+          combatLog: [...state.combatLog, ...fullEntries],
+        }));
+      },
+
+      clearCombatLog: () => {
+        logger.store('clearCombatLog', {});
+        set({ combatLog: [], combatTurn: 0 });
+      },
+
+      incrementCombatTurn: () => {
+        const newTurn = get().combatTurn + 1;
+        logger.store('incrementCombatTurn', { newTurn });
+        set({ combatTurn: newTurn });
+      },
+
       setSettings: (newSettings) => {
         logger.store('setSettings', newSettings);
         set((state) => ({
@@ -357,9 +516,12 @@ export const useGameStore = create<GameState>()(
           player: null,
           scene: null,
           history: [],
+          historySummary: null,
           npcs: new Map(),
           sprites: new Map(),
           combat: null,
+          combatLog: [],
+          combatTurn: 0,
           isLoading: false,
           error: null,
         });
@@ -371,6 +533,7 @@ export const useGameStore = create<GameState>()(
         player: state.player,
         scene: state.scene,
         history: state.history,
+        historySummary: state.historySummary,
         settings: state.settings,
       }),
     }
